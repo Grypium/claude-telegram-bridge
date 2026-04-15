@@ -28,6 +28,9 @@ ctb                 # Controller: ./ctb <command> <name|all>
 ## Usage
 
 ```bash
+# First-time setup — creates venv and installs dependencies
+./ctb install
+
 # Create a new agent (interactive)
 ./ctb create myagent
 
@@ -45,6 +48,16 @@ ctb                 # Controller: ./ctb <command> <name|all>
 
 # Delete an agent (prompts for confirmation)
 ./ctb delete myagent
+```
+
+## Getting started
+
+```bash
+git clone <repo>
+cd claude-telegram-bridge
+./ctb install        # creates venv, installs requirements.txt
+./ctb create myagent # interactive setup
+./ctb start myagent
 ```
 
 ## Adding a new agent

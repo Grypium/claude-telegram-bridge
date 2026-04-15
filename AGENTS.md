@@ -5,8 +5,8 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ## Commands
 
 ```bash
-# Setup
-python -m venv venv && pip install -r requirements.txt
+# First-time setup — creates venv from system python3, installs requirements.txt
+./ctb install
 
 # Run a single agent (foreground, logs to stdout)
 python run.py agents/<name>

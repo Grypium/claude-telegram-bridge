@@ -1,9 +1,71 @@
 #!/bin/bash
 # Telegram Bridge Controller
-# Usage: ./ctb <start|stop|restart|status|logs|create|delete> <agent_name|all>
+# Usage: ./ctb <install|start|stop|restart|status|logs|create|delete> <agent_name|all>
 
 BRIDGE_DIR="$(cd "$(dirname "$0")" && pwd)"
 PYTHON="$BRIDGE_DIR/venv/bin/python3"
+
+install_bridge() {
+    echo "Installing Telegram Bridge..."
+    echo ""
+
+    # Find a system python3
+    SYSTEM_PYTHON="$(command -v python3)"
+    if [ -z "$SYSTEM_PYTHON" ]; then
+        echo "❌ python3 not found in PATH"
+        return 1
+    fi
+    echo "Using Python: $SYSTEM_PYTHON ($($SYSTEM_PYTHON --version))"
+
+    # Create venv
+    local venv_dir="$BRIDGE_DIR/venv"
+    if [ -d "$venv_dir" ]; then
+        echo "⚠️  Virtual environment already exists at $venv_dir"
+        read -p "Recreate it? [y/N] " confirm
+        case "$confirm" in
+            [yY]|[yY][eE][sS])
+                echo "Removing existing venv..."
+                rm -rf "$venv_dir"
+                ;;
+            *)
+                echo "Keeping existing venv, re-running pip install..."
+                ;;
+        esac
+    fi
+
+    if [ ! -d "$venv_dir" ]; then
+        echo "Creating virtual environment at $venv_dir..."
+        "$SYSTEM_PYTHON" -m venv "$venv_dir"
+        if [ $? -ne 0 ]; then
+            echo "❌ Failed to create virtual environment"
+            return 1
+        fi
+        echo "✅ Virtual environment created"
+    fi
+
+    # Install requirements
+    local req_file="$BRIDGE_DIR/requirements.txt"
+    if [ ! -f "$req_file" ]; then
+        echo "❌ requirements.txt not found at $req_file"
+        return 1
+    fi
+
+    echo ""
+    echo "Installing dependencies from requirements.txt..."
+    "$venv_dir/bin/pip" install --upgrade pip -q
+    "$venv_dir/bin/pip" install -r "$req_file"
+    if [ $? -ne 0 ]; then
+        echo "❌ pip install failed"
+        return 1
+    fi
+
+    echo ""
+    echo "✅ Installation complete"
+    echo "   Python: $($venv_dir/bin/python3 --version)"
+    echo "   Venv:   $venv_dir"
+    echo ""
+    echo "Next: ./ctb create <agent_name>"
+}
 
 start_agent() {
     local agent="$1"
@@ -341,11 +403,17 @@ ACTION="$1"
 AGENT="$2"
 
 if [ -z "$ACTION" ]; then
-    echo "Usage: $0 <start|stop|restart|status|logs|create|delete> <agent_name|all>"
+    echo "Usage: $0 <install|start|stop|restart|status|logs|create|delete> <agent_name|all>"
     echo ""
     echo "Agents:"
     get_agents | while read a; do echo "  $a"; done
     exit 1
+fi
+
+# install takes no agent argument
+if [ "$ACTION" = "install" ]; then
+    install_bridge
+    exit $?
 fi
 
 # create and delete don't support "all" and need an agent name
