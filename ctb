@@ -1,0 +1,379 @@
+#!/bin/bash
+# Telegram Bridge Controller
+# Usage: ./ctb <start|stop|restart|status|logs|create|delete> <agent_name|all>
+
+BRIDGE_DIR="$(cd "$(dirname "$0")" && pwd)"
+PYTHON="$BRIDGE_DIR/venv/bin/python3"
+
+start_agent() {
+    local agent="$1"
+    local agent_dir="$BRIDGE_DIR/agents/$agent"
+    local log_file="$agent_dir/bridge.log"
+    local pid_file="$agent_dir/bridge.pid"
+    
+    if [ ! -f "$agent_dir/config.env" ]; then
+        echo "❌ No config.env found for $agent"
+        return 1
+    fi
+    
+    # Check if already running
+    if [ -f "$pid_file" ] && kill -0 "$(cat "$pid_file")" 2>/dev/null; then
+        echo "⚠️  $agent already running (PID $(cat "$pid_file"))"
+        return 0
+    fi
+    
+    echo "Starting $agent..."
+    cd "$BRIDGE_DIR" && PYTHONUNBUFFERED=1 nohup "$PYTHON" -u run.py "agents/$agent" >> "$log_file" 2>&1 &
+    echo $! > "$pid_file"
+    echo "✅ $agent started (PID $!)"
+}
+
+stop_agent() {
+    local agent="$1"
+    local pid_file="$BRIDGE_DIR/agents/$agent/bridge.pid"
+    
+    if [ -f "$pid_file" ]; then
+        local pid=$(cat "$pid_file")
+        if kill -0 "$pid" 2>/dev/null; then
+            kill "$pid" 2>/dev/null
+            echo "🛑 $agent stopped (PID $pid)"
+        else
+            echo "⚠️  $agent not running (stale PID $pid)"
+        fi
+        rm -f "$pid_file"
+    else
+        # Try pkill as fallback
+        pkill -f "run.py agents/$agent" 2>/dev/null
+        echo "🛑 $agent stopped (pkill)"
+    fi
+}
+
+status_agent() {
+    local agent="$1"
+    local pid_file="$BRIDGE_DIR/agents/$agent/bridge.pid"
+    
+    if [ -f "$pid_file" ] && kill -0 "$(cat "$pid_file")" 2>/dev/null; then
+        echo "✅ $agent: running (PID $(cat "$pid_file"))"
+    else
+        echo "❌ $agent: stopped"
+    fi
+}
+
+logs_agent() {
+    local agent="$1"
+    tail -20 "$BRIDGE_DIR/agents/$agent/bridge.log" 2>/dev/null || echo "No logs for $agent"
+}
+
+get_agents() {
+    ls -d "$BRIDGE_DIR/agents"/*/config.env 2>/dev/null | while read f; do
+        basename "$(dirname "$f")"
+    done
+}
+
+select_from_menu() {
+    local prompt="$1"
+    shift
+    local options=("$@")
+    local selected=0
+    local count=${#options[@]}
+
+    # Hide cursor
+    tput civis 2>/dev/null
+
+    _cleanup_menu() {
+        tput cnorm 2>/dev/null
+    }
+    trap _cleanup_menu RETURN
+
+    # Print prompt once
+    echo "$prompt"
+
+    # Draw initial menu
+    for i in "${!options[@]}"; do
+        if [ "$i" -eq "$selected" ]; then
+            echo "  > ${options[$i]}"
+        else
+            echo "    ${options[$i]}"
+        fi
+    done
+
+    while true; do
+        # Read a keypress
+        IFS= read -rsn1 key
+        if [ "$key" = $'\x1b' ]; then
+            IFS= read -rsn2 -t 0.1 rest
+            key="$key$rest"
+        fi
+
+        case "$key" in
+            $'\x1b[A')  # Up arrow
+                selected=$(( (selected - 1 + count) % count ))
+                ;;
+            $'\x1b[B')  # Down arrow
+                selected=$(( (selected + 1) % count ))
+                ;;
+            '')  # Enter
+                # Move cursor up to overwrite menu lines
+                for (( i=0; i<count; i++ )); do tput cuu1; done
+                tput el
+                # Print selection on the cleared line
+                echo "  ${options[$selected]}"
+                MENU_RESULT="${options[$selected]}"
+                tput cnorm 2>/dev/null
+                return 0
+                ;;
+        esac
+
+        # Redraw menu in place
+        for (( i=0; i<count; i++ )); do tput cuu1; done
+        for i in "${!options[@]}"; do
+            tput el
+            if [ "$i" -eq "$selected" ]; then
+                echo "  > ${options[$i]}"
+            else
+                echo "    ${options[$i]}"
+            fi
+        done
+    done
+}
+
+# Read multiple lines until a blank line is entered. Stores result in MULTILINE_RESULT.
+read_multiline() {
+    local lines=()
+    local line
+    while IFS= read -r line; do
+        [ -z "$line" ] && break
+        lines+=("$line")
+    done
+    if [ ${#lines[@]} -gt 0 ]; then
+        MULTILINE_RESULT="$(printf '%s\n' "${lines[@]}")"
+    else
+        MULTILINE_RESULT=""
+    fi
+}
+
+setup_workspace_files() {
+    local workspace_dir="$1"
+    local agent_name="$2"
+
+    mkdir -p "$workspace_dir"
+
+    echo ""
+    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    echo " Agent Identity  —  SOUL.md"
+    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    echo "(All fields optional — press Enter to skip)"
+    echo ""
+
+    read -p "Persona / character name (e.g. 'Ares, a strategic research assistant'): " soul_persona
+    read -p "Communication style (e.g. 'direct and concise, dry wit'): " soul_style
+    echo "Personality description (blank line to finish):"
+    read_multiline; local soul_desc="$MULTILINE_RESULT"
+    echo "Core focus areas or special capabilities (blank line to finish):"
+    read_multiline; local soul_focus="$MULTILINE_RESULT"
+
+    # Write SOUL.md if anything was provided
+    local soul_content=""
+    [ -n "$soul_persona" ]  && soul_content+="# Persona\n$soul_persona\n\n"
+    [ -n "$soul_style" ]    && soul_content+="# Communication Style\n$soul_style\n\n"
+    [ -n "$soul_desc" ]     && soul_content+="# Personality\n$soul_desc\n\n"
+    [ -n "$soul_focus" ]    && soul_content+="# Focus Areas\n$soul_focus\n\n"
+
+    if [ -n "$soul_content" ]; then
+        printf '%b' "$soul_content" > "$workspace_dir/SOUL.md"
+        echo "   ✅ SOUL.md written"
+    else
+        echo "   ⚠️  SOUL.md skipped (no input)"
+    fi
+
+    echo ""
+    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    echo " User Profile  —  USER.md"
+    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    echo "(All fields optional — press Enter to skip)"
+    echo ""
+
+    read -p "User's name: " user_name
+    read -p "User's role or occupation: " user_role
+    read -p "How the agent should address them (e.g. 'by first name', 'as boss'): " user_address
+    echo "Key context, preferences, or background (blank line to finish):"
+    read_multiline; local user_context="$MULTILINE_RESULT"
+
+    # Write USER.md if anything was provided
+    local user_content=""
+    [ -n "$user_name" ]    && user_content+="# Name\n$user_name\n\n"
+    [ -n "$user_role" ]    && user_content+="# Role\n$user_role\n\n"
+    [ -n "$user_address" ] && user_content+="# How to Address\n$user_address\n\n"
+    [ -n "$user_context" ] && user_content+="# Background & Preferences\n$user_context\n\n"
+
+    if [ -n "$user_content" ]; then
+        printf '%b' "$user_content" > "$workspace_dir/USER.md"
+        echo "   ✅ USER.md written"
+    else
+        echo "   ⚠️  USER.md skipped (no input)"
+    fi
+
+    # Always write MEMORY.md template
+    cat > "$workspace_dir/MEMORY.md" <<EOF
+# Memory
+
+Long-term memory for $agent_name. Update this file when significant decisions,
+events, or context should be remembered across sessions.
+
+## Key Facts
+
+<!-- Important standing facts about the user, their work, or ongoing projects -->
+
+## Decisions & Preferences
+
+<!-- Decisions made, approaches preferred, things to always/never do -->
+
+## Ongoing Projects
+
+<!-- Active projects and their current state -->
+
+## People & Relationships
+
+<!-- People the user mentions, their roles, how they relate to the user -->
+
+## Notes
+
+<!-- Anything else worth keeping -->
+EOF
+    echo "   ✅ MEMORY.md template written"
+}
+
+create_agent() {
+    local agent="$1"
+    local agent_dir="$BRIDGE_DIR/agents/$agent"
+
+    if [ -d "$agent_dir" ]; then
+        echo "❌ Agent '$agent' already exists at $agent_dir"
+        return 1
+    fi
+
+    echo "Creating agent: $agent"
+    echo ""
+
+    read -p "AGENT_NAME [$agent]: " input_name
+    local agent_name="${input_name:-$agent}"
+
+    read -p "TELEGRAM_BOT_TOKEN: " bot_token
+    if [ -z "$bot_token" ]; then
+        echo "❌ TELEGRAM_BOT_TOKEN is required"
+        return 1
+    fi
+
+    read -p "TELEGRAM_ALLOWED_USER (primary user ID): " allowed_user
+    if [ -z "$allowed_user" ]; then
+        echo "❌ TELEGRAM_ALLOWED_USER is required"
+        return 1
+    fi
+
+    read -p "TELEGRAM_ALLOWED_USERS (comma-separated extra user IDs, or leave blank): " allowed_users
+
+    read -p "WORKSPACE_DIR [leave blank to use $agent_dir/workspace]: " workspace_dir
+    workspace_dir="${workspace_dir:-$agent_dir/workspace}"
+
+    read -p "NOTIFY_PORT [9998]: " notify_port
+    notify_port="${notify_port:-9998}"
+
+    local model_options=("claude-sonnet-4-6" "claude-opus-4-6" "claude-haiku-4-5")
+    select_from_menu "MODEL (use ↑↓ arrows, Enter to select):" "${model_options[@]}"
+    local model="$MENU_RESULT"
+
+    mkdir -p "$agent_dir"
+
+    cat > "$agent_dir/config.env" <<EOF
+AGENT_NAME=$agent_name
+TELEGRAM_BOT_TOKEN=$bot_token
+TELEGRAM_ALLOWED_USER=$allowed_user
+TELEGRAM_ALLOWED_USERS=$allowed_users
+WORKSPACE_DIR=$workspace_dir
+NOTIFY_PORT=$notify_port
+MODEL=$model
+EOF
+
+    echo ""
+    echo "✅ config.env written"
+
+    setup_workspace_files "$workspace_dir" "$agent_name"
+
+    echo ""
+    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    echo "✅ Agent '$agent' ready at $agent_dir"
+    echo "   Workspace: $workspace_dir"
+    echo ""
+    echo "   You can edit the workspace files at any time:"
+    echo "     $workspace_dir/SOUL.md"
+    echo "     $workspace_dir/USER.md"
+    echo "     $workspace_dir/MEMORY.md"
+    echo ""
+    echo "   When ready: ./ctb start $agent"
+    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+}
+
+delete_agent() {
+    local agent="$1"
+    local agent_dir="$BRIDGE_DIR/agents/$agent"
+
+    if [ ! -d "$agent_dir" ]; then
+        echo "❌ Agent '$agent' not found at $agent_dir"
+        return 1
+    fi
+
+    echo "⚠️  Are you sure you want to delete '$agent'? This cannot be undone. [y/N] "
+    read -r confirm
+    case "$confirm" in
+        [yY]|[yY][eE][sS]) ;;
+        *)
+            echo "Aborted."
+            return 0
+            ;;
+    esac
+
+    stop_agent "$agent"
+    rm -rf "$agent_dir"
+    echo "🗑  Agent '$agent' deleted"
+}
+
+ACTION="$1"
+AGENT="$2"
+
+if [ -z "$ACTION" ]; then
+    echo "Usage: $0 <start|stop|restart|status|logs|create|delete> <agent_name|all>"
+    echo ""
+    echo "Agents:"
+    get_agents | while read a; do echo "  $a"; done
+    exit 1
+fi
+
+# create and delete don't support "all" and need an agent name
+if [ "$ACTION" = "create" ] || [ "$ACTION" = "delete" ]; then
+    if [ -z "$AGENT" ]; then
+        echo "Usage: $0 $ACTION <agent_name>"
+        exit 1
+    fi
+    case "$ACTION" in
+        create) create_agent "$AGENT" ;;
+        delete) delete_agent "$AGENT" ;;
+    esac
+    exit $?
+fi
+
+if [ "$AGENT" = "all" ] || [ -z "$AGENT" ]; then
+    agents=$(get_agents)
+else
+    agents="$AGENT"
+fi
+
+for agent in $agents; do
+    case "$ACTION" in
+        start)   start_agent "$agent" ;;
+        stop)    stop_agent "$agent" ;;
+        restart) stop_agent "$agent"; sleep 2; start_agent "$agent" ;;
+        status)  status_agent "$agent" ;;
+        logs)    echo "=== $agent ==="; logs_agent "$agent"; echo "" ;;
+        *)       echo "Unknown action: $ACTION" ;;
+    esac
+done
