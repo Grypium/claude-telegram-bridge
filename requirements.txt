@@ -1,7 +1,7 @@
 # Ares Telegram Bridge Dependencies
 
 # Core Agent SDK for Claude interactions
-claude-agent-sdk>=1.0.0
+claude-agent-sdk
 
 # HTTP client for Telegram API calls
 httpx>=0.24.0
