@@ -23,11 +23,12 @@ class TelegramPoller:
     """Telegram bot poller with message handling."""
 
     # Model aliases for easy switching
-    # Current 4.6 generation model IDs (April 2026)
+    # Updated April 2026 — Opus 4.7 is latest
     MODEL_ALIASES = {
+        "opus": "claude-opus-4-7",
         "sonnet": "claude-sonnet-4-6",
-        "opus": "claude-opus-4-6",
         "haiku": "claude-haiku-4-5",
+        "opus-4.7": "claude-opus-4-7",
         "sonnet-4.6": "claude-sonnet-4-6",
         "opus-4.6": "claude-opus-4-6",
         # Legacy
