@@ -375,7 +375,7 @@ create_agent() {
     read -p "NOTIFY_PORT [$default_port]: " notify_port
     notify_port="${notify_port:-$default_port}"
 
-    local model_options=("claude-sonnet-4-6" "claude-opus-4-6" "claude-haiku-4-5")
+    local model_options=("claude-opus-4-7" "claude-sonnet-4-6" "claude-opus-4-6" "claude-haiku-4-5")
     select_from_menu "MODEL (use ↑↓ arrows, Enter to select):" "${model_options[@]}"
     local model="$MENU_RESULT"
 
