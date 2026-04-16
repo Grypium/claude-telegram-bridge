@@ -134,6 +134,7 @@ class SessionManager:
             async for msg in self._client.receive_messages():
                 if isinstance(msg, SystemMessage):
                     self._capture_session_id_from_system(msg)
+                    self._check_compaction(msg)
 
                 elif isinstance(msg, AssistantMessage):
                     self._capture_session_id_from_assistant(msg)
@@ -186,6 +187,37 @@ class SessionManager:
                     "updated_at": time.time(),
                 })
                 logger.info(f"Captured session ID: {sid}")
+
+    def _check_compaction(self, msg):
+        """Detect compaction events and trigger background dreaming."""
+        try:
+            # SystemMessage may have subtype as attribute or in data dict
+            subtype = getattr(msg, 'subtype', None)
+            if not subtype and hasattr(msg, 'data') and isinstance(msg.data, dict):
+                subtype = msg.data.get('subtype')
+            
+            if subtype == 'compact_boundary':
+                logger.info("🌙 Compaction detected — triggering background dream cycle")
+                # Run dreaming as a background subprocess so it doesn't block
+                import subprocess
+                bridge_dir = Path(__file__).parent.parent
+                dream_script = bridge_dir / "dream.sh"
+                agent_dir = self._session_file.parent if self._session_file else None
+                
+                if dream_script.exists() and agent_dir:
+                    agent_name = agent_dir.name
+                    subprocess.Popen(
+                        [str(dream_script), agent_name],
+                        cwd=str(bridge_dir),
+                        stdout=open(agent_dir / "dream.log", "a"),
+                        stderr=subprocess.STDOUT,
+                        start_new_session=True,  # Fully detach
+                    )
+                    logger.info(f"🌙 Dream process launched for {agent_name}")
+                else:
+                    logger.warning(f"Cannot dream: script={dream_script.exists()}, agent_dir={agent_dir}")
+        except Exception as e:
+            logger.error(f"Error checking compaction: {e}")
 
     def _capture_session_id_from_assistant(self, msg):
         if hasattr(msg, 'session_id') and msg.session_id and msg.session_id != self._session_id:

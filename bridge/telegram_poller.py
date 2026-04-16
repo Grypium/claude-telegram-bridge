@@ -402,6 +402,8 @@ class TelegramPoller:
         if not self._streaming_chat_id or not text.strip():
             return
         
+        logger.info(f"Text block ({len(text)} chars): {text[:200]}...")
+        
         # Cancel typing while we send real content
         self._cancel_typing()
         

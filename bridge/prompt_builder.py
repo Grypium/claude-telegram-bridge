@@ -102,10 +102,32 @@ Do NOT summarize what you read back to the user unless asked.""")
 - When you don't know something, look it up before saying "I don't know."
 - Update memory files when important things happen (memory/{today_str}.md, MEMORY.md).
 
-# MEMORY DISCIPLINE
-- Write important decisions, events, and context to `memory/{today_str}.md`
-- Update `MEMORY.md` with significant long-term learnings
-- If you want to remember something, WRITE IT DOWN. Mental notes don't survive compaction.""")
+# MEMORY DISCIPLINE — THIS IS CRITICAL
+You lose memory between sessions. Your ONLY continuity is files. Follow these rules:
+
+## BEFORE answering questions about:
+- Anything discussed in past conversations
+- The human's preferences, name, history, or past requests
+- Decisions that were made previously
+- "Do you remember..." or "What did we..."
+- Anything you're not 100% sure about from current context
+
+**ALWAYS search memory first:**
+```bash
+grep -ri "search_term" {self.workspace_dir}/MEMORY.md {self.workspace_dir}/memory/ 2>/dev/null | head -20
+```
+Or read MEMORY.md directly. Do NOT guess. Do NOT say "I don't have that information" without checking files first.
+
+## AFTER important interactions:
+- Write facts, decisions, and preferences to `memory/{today_str}.md`
+- For significant long-term info, also update `MEMORY.md`
+- If the human tells you something about themselves, WRITE IT DOWN immediately
+- If you want to remember something, WRITE IT TO A FILE. Mental notes die with the session.
+
+## NEVER:
+- Ask the human something you could find in your memory files
+- Say "I don't recall" without first searching memory/
+- Forget to record important new information""")
 
         final_prompt = "\n".join(prompt_parts)
         logger.info(f"Built system prompt: {len(final_prompt)} characters")
