@@ -59,6 +59,16 @@ class TelegramPoller:
         self.last_message_time = 0
         self.min_message_interval = 1.0
 
+        # Streaming destination. _streaming_chat_id is the chat of the currently
+        # processing user turn; it is cleared when that turn ends. _last_chat_id
+        # survives turn boundaries so OUT-OF-BAND assistant turns (produced when the
+        # harness re-invokes the model after background work finishes — e.g. a
+        # backgrounded Bash command, an Agent, or a Monitor) still reach Telegram.
+        # Without this, those turns have _streaming_chat_id == None and every text
+        # block is silently dropped.
+        self._streaming_chat_id = None
+        self._last_chat_id = allowed_user_id  # DM: chat_id == user_id
+
         logger.info(f"TelegramPoller initialized for user {allowed_user_id}")
 
     async def start(self):
@@ -354,6 +364,7 @@ class TelegramPoller:
         
         self._processing = True
         self._streaming_chat_id = chat_id
+        self._last_chat_id = chat_id      # sticky: keeps out-of-band turns deliverable
         self._blocks_sent = 0
         try:
             # Send typing indicator
@@ -399,18 +410,31 @@ class TelegramPoller:
 
     async def on_text_block(self, text: str):
         """Called by SessionManager when a text block arrives from Claude.
-        Sends it to Telegram immediately."""
-        if not self._streaming_chat_id or not text.strip():
+        Sends it to Telegram immediately.
+
+        Delivers both in-turn replies and out-of-band turns (triggered by a
+        background-task completion rather than a user message). The latter have no
+        _streaming_chat_id, so they fall back to _last_chat_id instead of being
+        dropped.
+        """
+        if not text.strip():
             return
-        
-        logger.info(f"Text block ({len(text)} chars): {text[:200]}...")
-        
+
+        out_of_band = self._streaming_chat_id is None
+        target = self._streaming_chat_id or self._last_chat_id
+        if not target:
+            logger.warning(f"Dropping text block — no known chat id ({len(text)} chars)")
+            return
+
+        logger.info(f"Text block{' [out-of-band]' if out_of_band else ''} "
+                    f"({len(text)} chars) -> {target}: {text[:200]}...")
+
         # Cancel typing while we send real content
         self._cancel_typing()
-        
-        await self.send_message(self._streaming_chat_id, text)
+
+        await self.send_message(target, text)
         self._blocks_sent += 1
-        
+
         # Restart typing for next tool-use gap (only if still processing)
         if self._processing and self._streaming_chat_id:
             self._typing_task = asyncio.create_task(self._keep_typing(self._streaming_chat_id))

@@ -139,6 +139,16 @@ class SessionManager:
                 elif isinstance(msg, AssistantMessage):
                     self._capture_session_id_from_assistant(msg)
 
+                    # Skip subagent output. Text produced inside a Task/Agent subagent
+                    # carries a non-None parent_tool_use_id (SDK contract: it is "Always
+                    # None for top-level conversation messages"). Subagent chatter is
+                    # internal and must never be forwarded to Telegram.
+                    if getattr(msg, "parent_tool_use_id", None) is not None:
+                        logger.info(
+                            f"Filtered subagent text (parent_tool_use_id={msg.parent_tool_use_id})"
+                        )
+                        continue
+
                     # Extract text from this message and stream it out
                     if hasattr(msg, 'content'):
                         text_parts = []
