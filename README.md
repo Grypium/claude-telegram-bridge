@@ -12,14 +12,10 @@ bridge/              # Shared code (all agents use this)
     notify.py
     prompt_builder.py  # Generic prompt builder
 
-agents/              # Per-agent config and state
-    ares/
-        config.env
+agents/              # Per-agent config and state (one dir per agent)
+    ares/            # Example agent — copy it, or use `./ctb create <name>`
+        config.env.example
         prompt_builder.py  # Custom (optional)
-    athena/
-        config.env
-    jarvis/
-        config.env
 
 run.py              # Entry point: python run.py agents/<name>
 ctb                 # Controller: ./ctb <command> <name|all>
@@ -37,8 +33,8 @@ ctb                 # Controller: ./ctb <command> <name|all>
 # Start / stop / restart
 ./ctb start ares
 ./ctb start all
-./ctb stop jarvis
-./ctb restart athena
+./ctb stop ares
+./ctb restart myagent
 
 # Check status
 ./ctb status all

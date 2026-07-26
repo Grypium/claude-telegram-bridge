@@ -5,7 +5,6 @@ Telegram Bridge Runner
 Usage:
     python run.py <agent_config_dir>
     python run.py agents/ares
-    python run.py agents/athena
 
 Each agent dir needs:
     config.env  — TELEGRAM_BOT_TOKEN, TELEGRAM_ALLOWED_USER, WORKSPACE_DIR, NOTIFY_PORT

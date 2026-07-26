@@ -99,7 +99,7 @@ class Dreamer:
         if not claude_dir.exists():
             return []
         
-        # Claude encodes workspace path as dir name: /Users/fuzz/workspace/athena -> -Users-fuzz-workspace-athena
+        # Claude encodes workspace path as dir name: /home/user/workspace/myagent -> -home-user-workspace-myagent
         workspace_slug = str(self.workspace_dir).replace("/", "-")
         if workspace_slug.startswith("-"):
             pass  # already starts with -
