@@ -25,9 +25,14 @@ class TelegramPoller:
     # Model aliases for easy switching
     # Updated April 2026 — Opus 4.7 is latest
     MODEL_ALIASES = {
-        "opus": "claude-opus-4-7",
+        "fable": "claude-fable-5",
+        "fable-5": "claude-fable-5",
+        "opus": "claude-opus-5",
+        "opus-5": "claude-opus-5",
         "sonnet": "claude-sonnet-4-6",
+        "sonnet-5": "claude-sonnet-5",
         "haiku": "claude-haiku-4-5",
+        "opus-4.8": "claude-opus-4-8",
         "opus-4.7": "claude-opus-4-7",
         "sonnet-4.6": "claude-sonnet-4-6",
         "opus-4.6": "claude-opus-4-6",
