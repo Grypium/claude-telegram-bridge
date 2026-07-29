@@ -60,6 +60,54 @@ Phrasing that shows the work happened, or is honestly flagged as outstanding:
 So an agent reporting *"Filed as issue #42"* or *"RUNNING — PID 4821, will report next turn"*
 passes. An agent saying *"I'll look into that"* does not.
 
+## Two layers: regex blocks, a model catches misses
+
+Regex alone has one failure that matters. It is not false alarms — a false alarm costs you one
+sentence ("already did that"). It is **misses**: phrasings no pattern anticipated, like
+*"once the backfill lands I'm swinging back to the vol test"*. A missed commitment is invisible
+by construction, because nothing alerts you that nothing happened.
+
+So the two layers are split by which failure they are good at:
+
+| layer | when | cost | catches |
+|---|---|---|---|
+| **regex** | every turn | ~35ms | the obvious phrasings — blocks the turn immediately |
+| **model** | only when regex is silent | 0ms in-turn (detached) | everything regex missed |
+
+The model call runs **detached**. The Stop hook sits in the critical path of every turn, so it
+must never wait on a network call — backgrounding makes a hang impossible by construction
+rather than by tuning a timeout.
+
+The verdict therefore arrives *after* the turn ends, delivered through the bridge's notify
+endpoint. That is better than blocking: it lands as a new message, creating a turn in which the
+missed work actually gets done, instead of a turn spent arguing about whether it was missed.
+
+```
+SYNC: 35ms  (turn ends here)
+detached audit -> INJECTED after ~20s  [phrasing the regex missed]
+control (clean message citing #29) -> no injection
+```
+
+Enable it in the config:
+
+```json
+{"llm_catch_misses": true, "llm_model": "claude-haiku-4-5-20251001", "llm_timeout_sec": 120}
+```
+
+Recursion is blocked by an env guard: the spawned child sets `COMMITMENT_CHECK_CHILD`, and any
+hook running with it set exits immediately. Without that, the adjudicator would trigger the very
+hook that invoked it.
+
+## Wake-trigger check
+
+Separately, and **mechanically** rather than semantically: if a message claims work is running
+and will be reported on, the hook checks whether a background task was actually started this
+turn (`Monitor`, `Bash` with `run_in_background`, `Agent`, `CronCreate`).
+
+If not, it blocks — because *"I'll report when it lands"* otherwise depends on the agent
+happening to be invoked again, which is not a mechanism. This reuses the hook's core principle:
+verify the artifact, don't trust the intention. Disable with `{"wake_trigger_check": false}`.
+
 ## Tuning
 
 Optional `~/.claude/hooks/commitment_check.config.json` — no reinstall needed:

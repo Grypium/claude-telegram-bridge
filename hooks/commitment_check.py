@@ -40,10 +40,25 @@ import hashlib
 import json
 import os
 import re
+import subprocess
 import sys
 import tempfile
 
 CONFIG_PATH = os.path.expanduser("~/.claude/hooks/commitment_check.config.json")
+
+# Set when we spawn a child model call, so the child's own Stop hook exits immediately.
+# Without this the adjudicator would trigger the very hook that invoked it, forever.
+CHILD_ENV = "COMMITMENT_CHECK_CHILD"
+
+# Tools that constitute "I actually started background work"
+BG_TOOLS = {"Monitor", "CronCreate", "ScheduleWakeup", "Task", "Agent"}
+
+# Phrasing that claims work is in flight and will be reported later
+RUNNING_CLAIMS = [
+    r"\bRUNNING\b", r"\bin the background\b", r"\bwhen it (lands|finishes|completes)\b",
+    r"\bI'?ll report\b", r"\bwill report\b", r"\breport (back )?(when|once)\b",
+    r"\bkicked off\b", r"\blaunched\b",
+]
 
 # Future-tense phrasing that reads as completed work but produces no artifact.
 PATTERNS = [
@@ -84,12 +99,197 @@ BLOCK_REASON = (
 )
 
 
+WAKE_REASON = (
+    "WAKE TRIGGER CHECK — your message says work is running and that you will report on it, "
+    "but no background task was started this turn.\n"
+    "Either start one now (Monitor, or Bash with run_in_background, so you are notified when "
+    "it finishes), or say plainly that the user must ask again for the result.\n\n"
+    "Otherwise 'I'll report when it lands' depends on you happening to be invoked again, which "
+    "is not a mechanism."
+)
+
+
 def load_config():
     try:
         with open(CONFIG_PATH) as f:
             return json.load(f)
     except Exception:
         return {}
+
+
+def turn_tool_uses(transcript_path):
+    """Tool names used since the last user message -- i.e. during THIS turn.
+
+    Mechanical, not semantic: we are asking "was background work actually started", the same
+    artifact-over-intention question the whole hook exists to enforce.
+    """
+    if not transcript_path or not os.path.exists(transcript_path):
+        return set()
+    turn, names = [], set()
+    try:
+        with open(transcript_path, "r", encoding="utf-8", errors="replace") as f:
+            for line in f:
+                try:
+                    d = json.loads(line)
+                except Exception:
+                    continue
+                t = d.get("type")
+                if t == "user":
+                    turn = []
+                elif t == "assistant":
+                    turn.append(d)
+        for d in turn:
+            for c in (d.get("message") or {}).get("content") or []:
+                if isinstance(c, dict) and c.get("type") == "tool_use":
+                    names.add(c.get("name") or "")
+                    inp = c.get("input") or {}
+                    if c.get("name") == "Bash" and inp.get("run_in_background"):
+                        names.add("Bash:background")
+    except Exception:
+        return set()
+    return names
+
+
+def wants_wake_trigger(text, tools):
+    """True if the message claims background work but no background task was started."""
+    if not any(re.search(p, text, re.IGNORECASE) for p in RUNNING_CLAIMS):
+        return False
+    return not (BG_TOOLS & tools) and "Bash:background" not in tools
+
+
+# Cheap gate before spending a model call: skip messages with no forward-looking marker at
+# all. Deliberately LOOSE -- it is tuned for recall, and anything it lets through is decided
+# by the model, not by this list.
+FUTURE_HINT = re.compile(
+    r"\b(i'?ll|i will|we'?ll|we will|next|then|after|once|going to|plan|planning|"
+    r"should|need to|want to|plan to|plans? to|plans?:|plan is|plan for|"
+    r"plan on|later|soon|upcoming|plan out|queue|queued|pending|todo|follow[- ]?up)\b",
+    re.IGNORECASE)
+
+
+def looks_worth_checking(text):
+    """Skip trivially-clean messages so most turns still cost nothing."""
+    if not text or len(text.strip()) < 40:
+        return False
+    return bool(FUTURE_HINT.search(text))
+
+
+def llm_adjudicate(text, cfg):
+    """Ask a small model whether this is a real unfulfilled commitment.
+
+    Returns True (block), False (allow), or None (undecided -> keep the regex verdict).
+
+    Called when the strict regex did NOT fire. That is deliberate and is the whole point:
+    the dangerous failure is a MISS, not a false alarm. A false alarm costs one sentence
+    ("already did that"); a miss costs a phantom task discovered days later. So the model is
+    spent on recall, where regex is weak, and never on turns regex already caught.
+
+    Fails to None on ANY error: a hook that can hang is worse than a hook that misses.
+    """
+    if os.environ.get(CHILD_ENV):
+        return None
+    model = cfg.get("llm_model", "claude-haiku-4-5-20251001")
+    # Generous by design: this runs DETACHED, so a slow call costs nothing but its own
+    # process. The old 8s was sized for a synchronous hook and silently timed out on real
+    # messages -- the CLI alone takes ~6.5s on a trivial prompt.
+    timeout = float(cfg.get("llm_timeout_sec", 120))
+    prompt = (
+        "You audit an AI agent's final message to its user for UNFULFILLED COMMITMENTS.\n\n"
+        "Block ONLY if the message promises future work that produced no artifact this turn.\n"
+        "Do NOT block if the work was done, is cited (issue/PR/commit/file/PID/task id), is "
+        "explicitly flagged NOT DONE or blocked, or is genuinely running in the background.\n"
+        "Describing results, findings or reasoning is never a commitment.\n\n"
+        "Reply with ONLY compact JSON: {\"block\": true|false, \"why\": \"<=12 words\"}\n\n"
+        "MESSAGE:\n" + text[-6000:]
+    )
+    env = dict(os.environ)
+    env[CHILD_ENV] = "1"
+    try:
+        p = subprocess.run(
+            ["claude", "-p", prompt, "--model", model],
+            capture_output=True, text=True, timeout=timeout, env=env,
+        )
+        out = (p.stdout or "").strip()
+        i, j = out.find("{"), out.rfind("}")
+        if i < 0 or j <= i:
+            return None
+        d = json.loads(out[i:j + 1])
+        v = d.get("block")
+        return bool(v) if isinstance(v, bool) else None
+    except Exception:
+        return None
+
+
+def spawn_audit(text, cfg):
+    """Fire the model check into the background and return immediately.
+
+    The synchronous path must never wait on a network call: the Stop hook sits in the critical
+    path of every turn, so a slow or hung model would stall the session for everyone. Detaching
+    makes that impossible by construction rather than by timeout tuning.
+
+    The consequence is that the verdict arrives AFTER the turn ends -- which turns out to be
+    better than blocking. It lands as a new message, creating a turn in which the missed work
+    actually gets done, instead of a turn spent arguing about whether it was missed.
+    """
+    if os.environ.get(CHILD_ENV):
+        return
+    try:
+        fd, path = tempfile.mkstemp(prefix="commitment_", suffix=".txt")
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(text)
+        env = dict(os.environ)
+        env[CHILD_ENV] = "1"
+        subprocess.Popen(
+            [sys.executable, os.path.abspath(__file__), "--audit", path],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, stdin=subprocess.DEVNULL,
+            start_new_session=True, env=env,
+        )
+    except Exception:
+        pass          # a failed audit must never affect the turn
+
+
+def notify(message, cfg):
+    """Inject the finding back into the session via the bridge's notify endpoint."""
+    url = cfg.get("notify_url") or os.environ.get("COMMITMENT_NOTIFY_URL") \
+        or f"http://127.0.0.1:{os.environ.get('NOTIFY_PORT', '9998')}/notify"
+    body = json.dumps({"message": message}).encode()
+    try:
+        import urllib.request
+        req = urllib.request.Request(url, data=body,
+                                     headers={"Content-Type": "application/json"})
+        urllib.request.urlopen(req, timeout=10).read()
+        return True
+    except Exception:
+        return False
+
+
+def run_audit(path):
+    """Child process: adjudicate, and notify only if a commitment was actually missed."""
+    try:
+        with open(path, encoding="utf-8") as f:
+            text = f.read()
+    except Exception:
+        return
+    finally:
+        try:
+            os.unlink(path)
+        except Exception:
+            pass
+    cfg = load_config()
+    # strip the child guard so the model call itself is permitted
+    os.environ.pop(CHILD_ENV, None)
+    verdict = llm_adjudicate(text, cfg)
+    os.environ[CHILD_ENV] = "1"
+    if verdict is not True:
+        return
+    notify(
+        "COMMITMENT CHECK (async) — the last message appears to promise work that was not "
+        "done and left no artifact.\n\n"
+        "If that is right: do it now, or record it as an issue/task and cite the identifier, "
+        "or state plainly that it is NOT DONE.\n"
+        "If it is wrong, say so in one line and carry on.",
+        cfg,
+    )
 
 
 def marker_path(session_id):
@@ -152,8 +352,23 @@ def main():
     if not text:
         sys.exit(0)
 
-    should_block, _ = evaluate(text, load_config())
-    if not should_block:
+    cfg = load_config()
+    should_block, _ = evaluate(text, cfg)
+
+    tools = turn_tool_uses(payload.get("transcript_path"))
+    wake = cfg.get("wake_trigger_check", True) and wants_wake_trigger(text, tools)
+
+    # Regex fired -> block. No model call: a false alarm here is cheap to answer, and paying
+    # latency to second-guess a hit we would mostly keep anyway buys nothing.
+    #
+    # Regex silent -> ask the model. This is where the expensive failure lives. Strict patterns
+    # cannot anticipate every phrasing ("once that lands I'll swing back to the vol test"), and
+    # a missed commitment is invisible by construction -- nobody is alerted that nothing
+    # happened. Recall is worth the seconds; precision is not.
+    if not should_block and cfg.get("llm_catch_misses", True) and looks_worth_checking(text):
+        spawn_audit(text, cfg)          # detached; cannot delay or hang this turn
+
+    if not should_block and not wake:
         sys.exit(0)
 
     # Don't re-challenge the exact same message twice.
@@ -167,7 +382,10 @@ def main():
     except Exception:
         pass
 
-    print(json.dumps({"decision": "block", "reason": BLOCK_REASON}))
+    reason = BLOCK_REASON if should_block else ""
+    if wake:
+        reason = (reason + "\n\n" if reason else "") + WAKE_REASON
+    print(json.dumps({"decision": "block", "reason": reason}))
     sys.exit(0)
 
 
@@ -202,7 +420,9 @@ def _selftest():
 
 
 if __name__ == "__main__":
-    if "--selftest" in sys.argv:
+    if "--audit" in sys.argv:
+        run_audit(sys.argv[sys.argv.index("--audit") + 1])
+    elif "--selftest" in sys.argv:
         print("commitment_check.py self-test\n")
         _selftest()
     else:
