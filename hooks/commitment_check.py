@@ -150,11 +150,29 @@ def turn_tool_uses(transcript_path):
     return names
 
 
+# Citing a concrete handle for the running work IS the artifact -- the same standard the rest
+# of the hook applies. A task id, PID, job number or service name is checkable; "it's running"
+# is not.
+HANDLE_CITED = re.compile(
+    r"\b(task|monitor|job|watcher|PID|pid)\s+[`\"']?[A-Za-z0-9_.-]{3,}"
+    r"|\b[a-z0-9]{8,12}\b(?=[^\w]*(still|armed|running|polling|active|watching))"
+    r"|\bnssm\b|\bservice\s+[A-Za-z][A-Za-z0-9_-]{2,}",
+    re.IGNORECASE)
+
+
 def wants_wake_trigger(text, tools):
-    """True if the message claims background work but no background task was started."""
+    """True if the message claims background work but nothing tracks it.
+
+    Satisfied by EITHER starting a background task this turn OR citing a handle for one that
+    already exists. The turn-scoped check alone was wrong: a persistent Monitor started in an
+    earlier turn is invisible to it, so every later status update would be nagged even though
+    the mechanism was in place. (It fired on exactly that case in real use.)
+    """
     if not any(re.search(p, text, re.IGNORECASE) for p in RUNNING_CLAIMS):
         return False
-    return not (BG_TOOLS & tools) and "Bash:background" not in tools
+    if (BG_TOOLS & tools) or "Bash:background" in tools:
+        return False
+    return not HANDLE_CITED.search(text)
 
 
 # Cheap gate before spending a model call: skip messages with no forward-looking marker at
@@ -404,6 +422,15 @@ def _selftest():
         ("", False),
         ("RUNNING — launched as PID 4821, will report next turn.", False),
     ]
+    wake_cases = [
+        ("RUNNING — backfill going, I'll report when it lands.", set(), True),
+        ("Backfill monitor beuvw391t still armed.", set(), False),
+        ("RUNNING — trades backfill; watcher task b7un5ca6w is polling.", set(), False),
+        ("RUNNING — launched, PID 4821 will report.", set(), False),
+        ("RUNNING — scan launched.", {"Monitor"}, False),
+        ("Kicked off the 30-day backfill.", {"Bash"}, True),
+        ("Results: mean +2.3%, t=1.9.", set(), False),
+    ]
     bad = 0
     for text, want in cases:
         got, _ = evaluate(text)
@@ -412,11 +439,17 @@ def _selftest():
             bad += 1
         label = "block" if got else "pass "
         print(f"  [{'ok' if ok else 'FAIL'}] {label}  {text[:58]!r}")
+    for text, tools, want in wake_cases:
+        got = wants_wake_trigger(text, tools)
+        ok = got == want
+        if not ok:
+            bad += 1
+        print(f"  [{'ok' if ok else 'FAIL'}] wake={'block' if got else 'pass '}  {text[:52]!r}")
     print()
     if bad:
         print(f"  {bad} case(s) failed")
         sys.exit(1)
-    print(f"  all {len(cases)} self-test cases passed")
+    print(f"  all {len(cases) + len(wake_cases)} self-test cases passed")
 
 
 if __name__ == "__main__":
