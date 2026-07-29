@@ -227,6 +227,19 @@ class TelegramBridge:
             self.telegram_poller.send_notification(message)
             logger.info(f"Forwarded notification: {len(message)} chars")
 
+    def _handle_inject(self, message: str):
+        """Feed a message into the agent's session as if the user had sent it.
+
+        This exists because /notify only reaches the human. The commitment hook's async audit
+        needs to reach the AGENT so it can act on the finding in a new turn -- otherwise a
+        detected-but-undelivered miss is indistinguishable from no miss at all.
+        """
+        if not self.session_manager:
+            logger.warning("inject requested but no session manager")
+            return
+        logger.info(f"Injecting {len(message)} chars into session")
+        return self.session_manager.send_message(message)
+
 
 async def main():
     if len(sys.argv) < 2:
@@ -261,17 +274,3 @@ if __name__ == "__main__":
     except Exception as e:
         logger.error(f"Fatal: {e}")
         sys.exit(1)
-
-
-    def _handle_inject(self, message: str):
-        """Feed a message into the agent's session as if the user had sent it.
-
-        This exists because /notify only reaches the human. The commitment hook's async audit
-        needs to reach the AGENT so it can act on the finding in a new turn -- otherwise a
-        detected-but-undelivered miss is indistinguishable from no miss at all.
-        """
-        if not self.session_manager:
-            logger.warning("inject requested but no session manager")
-            return
-        logger.info(f"Injecting {len(message)} chars into session")
-        return self.session_manager.send_message(message)
