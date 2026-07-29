@@ -113,3 +113,24 @@ Switch models at runtime with `/model <alias>` in Telegram.
 - Auto-reconnect on Claude process death
 - Message interrupt (new message cancels stuck task)
 - Notification endpoint: `POST http://localhost:<NOTIFY_PORT>/notify` with `{"message": "..."}`
+
+## Hooks
+
+### Commitment Check
+
+A Stop hook that blocks turn-end when the agent states an intention without acting on it —
+*"I'll file those issues"*, *"Fixing and rerunning now"* — and then stops. The intention
+evaporates at the turn boundary, but it reads to you like completed work.
+
+```bash
+./hooks/install.sh              # install (idempotent, backs up settings.json)
+./hooks/install.sh --uninstall  # remove cleanly
+python3 hooks/commitment_check.py --selftest
+```
+
+The agent must then either do the thing, record it as a durable artifact and cite it, or write
+`NOT DONE:` with a reason. Messages citing evidence (`DONE`, `RUNNING`, `issue #42`, `PID 4821`,
+`blocked on`) pass through untouched.
+
+Cannot loop, fails open, and is tunable via `~/.claude/hooks/commitment_check.config.json`.
+See [hooks/README.md](hooks/README.md).
