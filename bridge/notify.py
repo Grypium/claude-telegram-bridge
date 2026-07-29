@@ -16,9 +16,17 @@ logger = logging.getLogger(__name__)
 class NotificationServer:
     """HTTP server for receiving event notifications."""
 
-    def __init__(self, port: int, telegram_callback: Callable[[str], None]):
+    def __init__(self, port: int, telegram_callback: Callable[[str], None],
+                 inject_callback: Optional[Callable[[str], None]] = None):
         self.port = port
         self.telegram_callback = telegram_callback
+        # /notify reaches the HUMAN. /inject reaches the AGENT.
+        #
+        # These are genuinely different destinations and conflating them cost us a real catch:
+        # the commitment hook's async audit detected an unfulfilled commitment, POSTed it to
+        # /notify, and the agent never saw it -- only the human did. A self-correcting check
+        # has to land in the agent's input stream, not in a chat window it cannot read.
+        self.inject_callback = inject_callback
         self.app = web.Application()
         self.runner: Optional[web.AppRunner] = None
         self.site: Optional[web.TCPSite] = None
@@ -26,6 +34,7 @@ class NotificationServer:
         # Setup routes
         self.app.router.add_post('/notify', self.handle_notification)
         self.app.router.add_post('/', self.handle_notification)  # Alternative endpoint
+        self.app.router.add_post('/inject', self.handle_inject)
         self.app.router.add_get('/health', self.handle_health)
 
         logger.info(f"NotificationServer initialized on port {port}")
@@ -70,6 +79,37 @@ class NotificationServer:
             return web.json_response({
                 'error': f'Server error: {str(e)}'
             }, status=500)
+
+    async def handle_inject(self, request: web.Request) -> web.Response:
+        """Feed a message into the agent's session as if it were user input.
+
+        Used by the commitment hook's detached audit so a finding reaches the agent and can be
+        acted on, rather than only alerting the human. Falls back to the Telegram callback if
+        no inject callback is wired, so a caller never silently loses the message.
+        """
+        try:
+            data = await request.json()
+            message = data.get('message')
+            if not message:
+                return web.json_response({'error': 'Missing message field'}, status=400)
+
+            if self.inject_callback:
+                logger.info(f"Inject from {request.remote}: {len(message)} chars")
+                result = self.inject_callback(message)
+                if asyncio.iscoroutine(result):
+                    asyncio.create_task(result)
+                return web.json_response({'status': 'success', 'delivered': 'session'})
+
+            logger.warning("No inject_callback wired; falling back to Telegram")
+            if self.telegram_callback:
+                self.telegram_callback(message)
+            return web.json_response({'status': 'success', 'delivered': 'telegram-fallback'})
+
+        except json.JSONDecodeError:
+            return web.json_response({'error': 'Invalid JSON format'}, status=400)
+        except Exception as e:
+            logger.error(f"Error handling inject: {e}")
+            return web.json_response({'error': f'Server error: {str(e)}'}, status=500)
 
     async def handle_health(self, request: web.Request) -> web.Response:
         """Health check endpoint."""
@@ -116,7 +156,7 @@ class NotificationServer:
         return {
             'running': self.site is not None,
             'port': self.port,
-            'endpoints': ['/notify', '/', '/health']
+            'endpoints': ['/notify', '/inject', '/', '/health']
         }
 
 

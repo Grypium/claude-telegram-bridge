@@ -275,18 +275,34 @@ def spawn_audit(text, cfg):
 
 
 def notify(message, cfg):
-    """Inject the finding back into the session via the bridge's notify endpoint."""
-    url = cfg.get("notify_url") or os.environ.get("COMMITMENT_NOTIFY_URL") \
-        or f"http://127.0.0.1:{os.environ.get('NOTIFY_PORT', '9998')}/notify"
+    """Deliver the finding to the AGENT, falling back to the human.
+
+    /inject enters the agent's input stream so it can act on the finding in a new turn.
+    /notify only reaches the human's chat window.
+
+    That distinction is the whole point: an audit that detects a missed commitment but
+    delivers it somewhere the agent cannot read is indistinguishable from no audit at all.
+    This happened in real use -- the model correctly caught an unfulfilled commitment, posted
+    it to /notify, and the agent carried on unaware while only the human saw it.
+    """
+    port = os.environ.get("NOTIFY_PORT", "9998")
+    urls = [cfg.get("inject_url") or os.environ.get("COMMITMENT_INJECT_URL")
+            or f"http://127.0.0.1:{port}/inject",
+            cfg.get("notify_url") or os.environ.get("COMMITMENT_NOTIFY_URL")
+            or f"http://127.0.0.1:{port}/notify"]
     body = json.dumps({"message": message}).encode()
-    try:
-        import urllib.request
-        req = urllib.request.Request(url, data=body,
-                                     headers={"Content-Type": "application/json"})
-        urllib.request.urlopen(req, timeout=10).read()
-        return True
-    except Exception:
-        return False
+    import urllib.request
+    for url in urls:
+        if not url:
+            continue
+        try:
+            req = urllib.request.Request(url, data=body,
+                                         headers={"Content-Type": "application/json"})
+            urllib.request.urlopen(req, timeout=10).read()
+            return True
+        except Exception:
+            continue
+    return False
 
 
 def run_audit(path):

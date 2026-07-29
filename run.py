@@ -5,6 +5,7 @@ Telegram Bridge Runner
 Usage:
     python run.py <agent_config_dir>
     python run.py agents/ares
+    python run.py agents/athena
 
 Each agent dir needs:
     config.env  — TELEGRAM_BOT_TOKEN, TELEGRAM_ALLOWED_USER, WORKSPACE_DIR, NOTIFY_PORT
@@ -63,6 +64,8 @@ class TelegramBridge:
         self.workspace_dir = os.getenv('WORKSPACE_DIR', str(self.agent_dir))
         self.notify_port = int(os.getenv('NOTIFY_PORT', '9998'))
         self.model = os.getenv('MODEL', 'claude-sonnet-4-6')
+        # Optional thinking-effort level (low/medium/high/max). Unset => model default.
+        self.effort = os.getenv('EFFORT') or None
 
         # Validate
         if not self.bot_token:
@@ -104,6 +107,7 @@ class TelegramBridge:
                 prompt_builder=prompt_builder,
                 model=self.model,
                 session_file=str(self.session_file),
+                effort=self.effort,
             )
 
             # Initialize Telegram poller
@@ -127,6 +131,7 @@ class TelegramBridge:
             self.notification_server = NotificationServer(
                 port=self.notify_port,
                 telegram_callback=self._handle_notification,
+                inject_callback=self._handle_inject,
             )
 
             # Start all
@@ -206,6 +211,8 @@ class TelegramBridge:
     def _handle_command(self, command: str, arg: str = None):
         if command == "set_model" and arg and self.session_manager:
             return self.session_manager.set_model(arg)
+        elif command == "set_effort" and arg and self.session_manager:
+            return self.session_manager.set_effort(arg)
         elif command == "interrupt" and self.session_manager:
             self.session_manager.request_interrupt()
             return "interrupted"
@@ -254,3 +261,17 @@ if __name__ == "__main__":
     except Exception as e:
         logger.error(f"Fatal: {e}")
         sys.exit(1)
+
+
+    def _handle_inject(self, message: str):
+        """Feed a message into the agent's session as if the user had sent it.
+
+        This exists because /notify only reaches the human. The commitment hook's async audit
+        needs to reach the AGENT so it can act on the finding in a new turn -- otherwise a
+        detected-but-undelivered miss is indistinguishable from no miss at all.
+        """
+        if not self.session_manager:
+            logger.warning("inject requested but no session manager")
+            return
+        logger.info(f"Injecting {len(message)} chars into session")
+        return self.session_manager.send_message(message)
