@@ -135,7 +135,15 @@ def turn_tool_uses(transcript_path):
                     continue
                 t = d.get("type")
                 if t == "user":
-                    turn = []
+                    # Tool RESULTS also arrive as type "user". Resetting on those wiped the
+                    # turn's tool calls, so the check only ever saw the final message and
+                    # fired even when a Monitor had just been started. Reset only on a real
+                    # user message -- one carrying actual text rather than a tool_result.
+                    c = (d.get("message") or {}).get("content")
+                    is_tool_result = isinstance(c, list) and any(
+                        isinstance(x, dict) and x.get("type") == "tool_result" for x in c)
+                    if not is_tool_result:
+                        turn = []
                 elif t == "assistant":
                     turn.append(d)
         for d in turn:
