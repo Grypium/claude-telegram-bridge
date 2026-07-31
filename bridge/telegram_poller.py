@@ -93,6 +93,9 @@ class TelegramPoller:
 
         # Start polling loop
         asyncio.create_task(self._polling_loop())
+        # ONE typing supervisor for the life of the process. See _typing_supervisor.
+        self._typing_chat_id = None
+        asyncio.create_task(self._typing_supervisor())
         return True
 
     async def _flush_pending_updates(self):
@@ -375,8 +378,8 @@ class TelegramPoller:
             # Send typing indicator
             await self._send_chat_action(chat_id, "typing")
 
-            # Start typing keepalive (runs until cancelled)
-            self._typing_task = asyncio.create_task(self._keep_typing(chat_id))
+            # Turn typing ON. State, not a task -- see _typing_supervisor.
+            self._typing_chat_id = chat_id
 
             # Get response from Claude — text blocks delivered via on_text_block callback
             if asyncio.iscoroutinefunction(self.claude_callback):
@@ -407,7 +410,9 @@ class TelegramPoller:
             self._streaming_chat_id = None
 
     def _cancel_typing(self):
-        """Cancel the typing keepalive task if it exists."""
+        """Turn typing OFF. Idempotent, and cannot leave anything running."""
+        self._typing_chat_id = None
+        # Legacy: older builds tracked a task here. Cancel it if one survives a hot reload.
         task = getattr(self, '_typing_task', None)
         if task and not task.done():
             task.cancel()
@@ -442,7 +447,7 @@ class TelegramPoller:
 
         # Restart typing for next tool-use gap (only if still processing)
         if self._processing and self._streaming_chat_id:
-            self._typing_task = asyncio.create_task(self._keep_typing(self._streaming_chat_id))
+            self._typing_chat_id = self._streaming_chat_id
 
     async def on_turn_start(self):
         """Called when a new turn begins."""
@@ -452,14 +457,46 @@ class TelegramPoller:
         """Called when a turn completes."""
         self._cancel_typing()
 
-    async def _keep_typing(self, chat_id: int):
-        """Keep sending typing indicator every 5 seconds while processing."""
-        try:
-            while True:
-                await asyncio.sleep(5)
-                await self._send_chat_action(chat_id, "typing")
-        except asyncio.CancelledError:
-            pass
+    async def _typing_supervisor(self):
+        """ONE task for the life of the process. Typing is DERIVED from state.
+
+        WHY THIS IS NOT A create_task/cancel PAIR ANY MORE
+            It used to be, tracked in the single slot self._typing_task, and it leaked tasks
+            that ran forever -- Telegram showed "typing" indefinitely after a turn ended.
+
+            on_text_block is called from TWO coroutines: the normal response stream, and the
+            watchdog in session_manager.py that emits "Still working..." every 2 minutes. Both
+            ran cancel-then-await-then-create against one slot:
+
+                A: _cancel_typing()  -> slot = None
+                A: await send_message(...)                  <-- yields
+                B: _cancel_typing()  -> slot already None, cancels NOTHING
+                B: await send_message(...)                  <-- yields
+                A: slot = taskA
+                B: slot = taskB      <-- taskA is now unreachable and immortal
+
+            taskA keeps POSTing sendChatAction every 5s forever. Nothing can cancel it, because
+            cancellation only ever reached whatever was in the slot. The existing "cancel any
+            leaked typing task from a previous message" guard could not help, for the same reason
+            it was needed: the orphan is not in the slot.
+
+            A boolean cannot be orphaned. Turning typing into state that one supervisor reads
+            makes the leak unrepresentable rather than merely unlikely.
+
+        4s, not 5: Telegram expires the indicator after ~5s, so a 5s period raced its own
+        expiry and made typing flicker during long tool runs.
+        """
+        while True:
+            await asyncio.sleep(4)
+            chat = getattr(self, "_typing_chat_id", None)
+            if chat is None:
+                continue
+            try:
+                await self._send_chat_action(chat, "typing")
+            except Exception as e:
+                # Never let a transient send failure kill the supervisor -- if this task dies,
+                # typing silently stops working for the entire process lifetime.
+                logger.debug(f"typing keepalive failed: {e}")
 
     async def send_message(self, chat_id: int, text: str):
         """Send message to Telegram chat."""
